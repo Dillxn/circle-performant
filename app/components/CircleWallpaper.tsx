@@ -131,16 +131,26 @@ type WaveParams = {
   pulseSpatialZ: number;
 };
 
+export type CameraVector = {
+  x?: number;
+  y?: number;
+  z?: number;
+};
+
 export type CircleWallpaperProps = {
   style?: CSSProperties;
   cameraDistance?: number;
   waveHeight?: number;
+  cameraTranslation?: CameraVector;
+  cameraRotation?: CameraVector;
 };
 
 export function CircleWallpaper({
   style,
   cameraDistance = DEFAULT_CAMERA_DISTANCE,
   waveHeight = DEFAULT_WAVE_HEIGHT,
+  cameraTranslation,
+  cameraRotation,
 }: CircleWallpaperProps = {}) {
   const effectiveCameraDistance = Number.isFinite(cameraDistance)
     ? cameraDistance
@@ -149,6 +159,14 @@ export function CircleWallpaper({
     ? waveHeight
     : DEFAULT_WAVE_HEIGHT;
   const normalizedWaveHeight = Math.max(effectiveWaveHeight, 0);
+  const sanitizeAxisValue = (value?: number) =>
+    typeof value === "number" && Number.isFinite(value) ? value : 0;
+  const translationX = sanitizeAxisValue(cameraTranslation?.x);
+  const translationY = sanitizeAxisValue(cameraTranslation?.y);
+  const translationZ = sanitizeAxisValue(cameraTranslation?.z);
+  const rotationX = sanitizeAxisValue(cameraRotation?.x);
+  const rotationY = sanitizeAxisValue(cameraRotation?.y);
+  const rotationZ = sanitizeAxisValue(cameraRotation?.z);
   const secondaryWaveAmplitude = normalizedWaveHeight * 0.15;
   const rippleWaveAmplitude = normalizedWaveHeight * 0.05;
   const containerRef = useRef<HTMLDivElement>(null);
@@ -215,8 +233,17 @@ export function CircleWallpaper({
       CAMERA_NEAR,
       CAMERA_FAR,
     );
-    camera.position.set(0, 0, effectiveCameraDistance);
+    camera.position.set(
+      translationX,
+      translationY,
+      effectiveCameraDistance + translationZ,
+    );
     camera.lookAt(0, 0, GRID_PLANE_Z);
+    if (rotationX !== 0 || rotationY !== 0 || rotationZ !== 0) {
+      camera.rotation.x += rotationX;
+      camera.rotation.y += rotationY;
+      camera.rotation.z += rotationZ;
+    }
 
     const circleGeometry = new THREE.PlaneGeometry(1, 1);
     const circleMaterial = new THREE.MeshBasicMaterial({
@@ -856,7 +883,7 @@ export function CircleWallpaper({
       camera.aspect = clientWidth / clientHeight;
       camera.updateProjectionMatrix();
 
-      const distanceToPlane = camera.position.z - GRID_PLANE_Z;
+      const distanceToPlane = Math.max(camera.position.z - GRID_PLANE_Z, 0.01);
       const verticalFov = THREE.MathUtils.degToRad(camera.fov);
       const viewHeight = 2 * Math.tan(verticalFov / 2) * distanceToPlane;
       const viewWidth = viewHeight * camera.aspect;
@@ -1005,7 +1032,18 @@ export function CircleWallpaper({
       particleTexture.dispose();
       renderer.dispose();
     };
-  }, [effectiveCameraDistance, normalizedWaveHeight, secondaryWaveAmplitude, rippleWaveAmplitude]);
+  }, [
+    effectiveCameraDistance,
+    normalizedWaveHeight,
+    secondaryWaveAmplitude,
+    rippleWaveAmplitude,
+    translationX,
+    translationY,
+    translationZ,
+    rotationX,
+    rotationY,
+    rotationZ,
+  ]);
 
   return (
     <div
