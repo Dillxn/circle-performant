@@ -1,7 +1,7 @@
 // app/components/CircleWallpaper.tsx
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type CSSProperties } from "react";
 import * as THREE from "three";
 
 const GRID_ROTATION_RAD = THREE.MathUtils.degToRad(20);
@@ -17,7 +17,11 @@ const HALF_OPACITY = 0.5;
 const FALLOFF_POWER = 3.2;
 const HORIZONTAL_SCROLL_SPEED = 80;
 
-export function CircleWallpaper() {
+export type CircleWallpaperProps = {
+  style?: CSSProperties;
+};
+
+export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -377,7 +381,12 @@ export function CircleWallpaper() {
     };
   }, []);
 
-  return <div ref={containerRef} style={{ position: "fixed", inset: 0, overflow: "hidden" }} />;
+  return (
+    <div
+      ref={containerRef}
+      style={{ position: "fixed", inset: 0, overflow: "hidden", ...style }}
+    />
+  );
 }
 
 export default CircleWallpaper;
