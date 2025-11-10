@@ -24,6 +24,8 @@ export default function Home() {
           }}
         >
           <CircleWallpaper
+            cameraDistance={20}
+            waveHeight={2}
             style={{
               position: "absolute",
               inset: 0,

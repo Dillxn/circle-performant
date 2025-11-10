@@ -17,7 +17,8 @@ const HALF_OPACITY = 0.5;
 const FALLOFF_POWER = 3.2;
 const HORIZONTAL_SCROLL_SPEED = 2.0;
 const CAMERA_FOV = 40;
-const CAMERA_DISTANCE = 45;
+const DEFAULT_CAMERA_DISTANCE = 45;
+const DEFAULT_WAVE_HEIGHT = 1;
 const CAMERA_NEAR = 0.1;
 const CAMERA_FAR = 200;
 const GRID_PLANE_Z = 0;
@@ -59,9 +60,24 @@ type WaveParams = {
 
 export type CircleWallpaperProps = {
   style?: CSSProperties;
+  cameraDistance?: number;
+  waveHeight?: number;
 };
 
-export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
+export function CircleWallpaper({
+  style,
+  cameraDistance = DEFAULT_CAMERA_DISTANCE,
+  waveHeight = DEFAULT_WAVE_HEIGHT,
+}: CircleWallpaperProps = {}) {
+  const effectiveCameraDistance = Number.isFinite(cameraDistance)
+    ? cameraDistance
+    : DEFAULT_CAMERA_DISTANCE;
+  const effectiveWaveHeight = Number.isFinite(waveHeight)
+    ? waveHeight
+    : DEFAULT_WAVE_HEIGHT;
+  const normalizedWaveHeight = Math.max(effectiveWaveHeight, 0);
+  const secondaryWaveAmplitude = normalizedWaveHeight * 0.15;
+  const rippleWaveAmplitude = normalizedWaveHeight * 0.05;
   const containerRef = useRef<HTMLDivElement>(null);
   const baseInstancesRef = useRef<BaseInstanceData[]>([]);
   const baseOpacityRef = useRef<Float32Array>(new Float32Array(0));
@@ -73,9 +89,9 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
     baseZ: GRID_PLANE_Z,
     scaleX: 1,
     scaleY: 1,
-    amplitude: 1,
-    secondaryAmplitude: 0.15,
-    rippleAmplitude: 0.05,
+    amplitude: normalizedWaveHeight,
+    secondaryAmplitude: secondaryWaveAmplitude,
+    rippleAmplitude: rippleWaveAmplitude,
     waveLength: 4,
   });
   const waveParamsRef = useRef<WaveParams>({
@@ -121,7 +137,7 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
       CAMERA_NEAR,
       CAMERA_FAR,
     );
-    camera.position.set(0, 0, CAMERA_DISTANCE);
+    camera.position.set(0, 0, effectiveCameraDistance);
     camera.lookAt(0, 0, GRID_PLANE_Z);
 
     const circleGeometry = new THREE.PlaneGeometry(1, 1);
@@ -351,7 +367,7 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
       const offsetX = -baseOffset * GRID_COS;
       const offsetY = -baseOffset * GRID_SIN;
       circlesGroup.position.set(-centerX + offsetX, -centerY + offsetY, 0);
-      const amplitude = 1;
+      const amplitude = normalizedWaveHeight;
       layoutStateRef.current = {
         hasData: true,
         xSpacing,
@@ -360,8 +376,8 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
         scaleX: diameter,
         scaleY: diameter,
         amplitude,
-        secondaryAmplitude: 0.15,
-        rippleAmplitude: 0.05,
+        secondaryAmplitude: secondaryWaveAmplitude,
+        rippleAmplitude: rippleWaveAmplitude,
         waveLength: 4.0,
       };
     };
@@ -613,16 +629,16 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
         baseZ: GRID_PLANE_Z,
         scaleX: 1,
         scaleY: 1,
-        amplitude: 1,
-        secondaryAmplitude: 0.15,
-        rippleAmplitude: 0.05,
+        amplitude: normalizedWaveHeight,
+        secondaryAmplitude: secondaryWaveAmplitude,
+        rippleAmplitude: rippleWaveAmplitude,
         waveLength: 4,
       };
       circleGeometry.dispose();
       circleMaterial.dispose();
       renderer.dispose();
     };
-  }, []);
+  }, [effectiveCameraDistance, normalizedWaveHeight, secondaryWaveAmplitude, rippleWaveAmplitude]);
 
   return (
     <div
