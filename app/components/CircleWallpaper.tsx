@@ -22,6 +22,55 @@ const DEFAULT_WAVE_HEIGHT = 1;
 const CAMERA_NEAR = 0.1;
 const CAMERA_FAR = 200;
 const GRID_PLANE_Z = 0;
+const PARTICLE_SPAWN_CHANCE = 0.48;
+const PARTICLE_OFFSET_X_RATIO = 0.75;
+const PARTICLE_OFFSET_Y_RATIO = 0.6;
+const PARTICLE_SIZE_MIN_RATIO = 0.08;
+const PARTICLE_SIZE_MAX_RATIO = 0.24;
+const PARTICLE_FLOAT_AMPLITUDE_MIN_RATIO = 0.15;
+const PARTICLE_FLOAT_AMPLITUDE_MAX_RATIO = 0.38;
+const PARTICLE_FLOAT_SPEED_MIN = 1.15;
+const PARTICLE_FLOAT_SPEED_MAX = 3.1;
+const PARTICLE_PULSE_SPEED_MIN = 0.6;
+const PARTICLE_PULSE_SPEED_MAX = 1.6;
+const PARTICLE_DEPTH_OFFSET_RATIO = 0.2;
+const PARTICLE_PULSE_STRENGTH = 0.3;
+const PARTICLE_SHIMMER_STRENGTH = 0.18;
+const PARTICLE_DRIFT_X_RATIO = 0.22;
+const PARTICLE_DRIFT_SPEED_MIN = 0.65;
+const PARTICLE_DRIFT_SPEED_MAX = 1.6;
+const PARTICLE_SPIN_SPEED_MIN = 1.25;
+const PARTICLE_SPIN_SPEED_MAX = 3.4;
+const PARTICLE_SPIN_AXIS = new THREE.Vector3(0, 0, 1);
+const PARTICLE_SWIRL_Z_RATIO = 0.14;
+const PARTICLE_SWIRL_SPEED_MIN = 0.7;
+const PARTICLE_SWIRL_SPEED_MAX = 1.9;
+
+function createParticleTexture(size = 128) {
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    const fallback = new THREE.Texture();
+    fallback.needsUpdate = true;
+    return fallback;
+  }
+  const center = size / 2;
+  const gradient = context.createRadialGradient(center, center, size * 0.08, center, center, center);
+  gradient.addColorStop(0, "rgba(255, 255, 255, 1)");
+  gradient.addColorStop(0.35, "rgba(225, 244, 255, 0.95)");
+  gradient.addColorStop(0.68, "rgba(130, 200, 255, 0.5)");
+  gradient.addColorStop(1, "rgba(110, 185, 255, 0)");
+  context.clearRect(0, 0, size, size);
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, size, size);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 1;
+  texture.needsUpdate = true;
+  return texture;
+}
 
 type BaseInstanceData = {
   baseX: number;
@@ -45,6 +94,30 @@ type LayoutState = {
   secondaryAmplitude: number;
   rippleAmplitude: number;
   waveLength: number;
+};
+
+type ParticleInstanceData = {
+  baseX: number;
+  baseY: number;
+  size: number;
+  floatAmplitude: number;
+  floatSpeed: number;
+  floatPhase: number;
+  pulseSpeed: number;
+  pulseOffset: number;
+  waveStrength: number;
+  depthOffset: number;
+  baseOpacity: number;
+  driftAmplitude: number;
+  driftSpeed: number;
+  driftPhase: number;
+  driftDirection: number;
+  swirlAmplitude: number;
+  swirlSpeed: number;
+  swirlPhase: number;
+  swirlDirection: number;
+  spinSpeed: number;
+  spinPhase: number;
 };
 
 type WaveParams = {
@@ -81,6 +154,8 @@ export function CircleWallpaper({
   const containerRef = useRef<HTMLDivElement>(null);
   const baseInstancesRef = useRef<BaseInstanceData[]>([]);
   const baseOpacityRef = useRef<Float32Array>(new Float32Array(0));
+  const particleInstancesRef = useRef<ParticleInstanceData[]>([]);
+  const particleOpacityRef = useRef<Float32Array>(new Float32Array(0));
   const layoutStateRef = useRef<LayoutState>({
     hasData: false,
     xSpacing: 1,
@@ -118,6 +193,9 @@ export function CircleWallpaper({
     const circlesGroup = new THREE.Group();
     circlesGroup.rotation.z = GRID_ROTATION_RAD;
     scrollGroup.add(circlesGroup);
+    const particlesGroup = new THREE.Group();
+    particlesGroup.rotation.z = GRID_ROTATION_RAD;
+    scrollGroup.add(particlesGroup);
     scene.add(scrollGroup);
 
     const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: "high-performance" });
@@ -164,9 +242,48 @@ export function CircleWallpaper({
     circleMaterial.customProgramCacheKey = () => "circle-opacity";
     circleMaterial.needsUpdate = true;
 
+    const particleGeometry = new THREE.PlaneGeometry(1, 1);
+    const particleTexture = createParticleTexture();
+    particleTexture.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
+    particleTexture.needsUpdate = true;
+    const particleMaterial = new THREE.MeshBasicMaterial({
+      color: 0x87c7ff,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      toneMapped: false,
+      blending: THREE.AdditiveBlending,
+    });
+    particleMaterial.side = THREE.DoubleSide;
+    particleMaterial.opacity = 1;
+    particleMaterial.map = particleTexture;
+    particleMaterial.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          '#include <common>\nattribute float instanceOpacity;\nvarying float vParticleOpacity;',
+        )
+        .replace(
+          "#include <begin_vertex>",
+          "#include <begin_vertex>\n\tvParticleOpacity = instanceOpacity;",
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "#include <common>\nvarying float vParticleOpacity;")
+        .replace(
+          "#include <dithering_fragment>",
+          "#include <dithering_fragment>\n\tgl_FragColor.a *= vParticleOpacity;",
+        );
+    };
+    particleMaterial.customProgramCacheKey = () => "particle-opacity";
+    particleMaterial.needsUpdate = true;
+
     let instancedCircles: THREE.InstancedMesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial> | null = null;
     let instanceOpacityAttribute: THREE.InstancedBufferAttribute | null = null;
     let instanceCapacity = 0;
+    let instancedParticles: THREE.InstancedMesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial> | null =
+      null;
+    let particleOpacityAttribute: THREE.InstancedBufferAttribute | null = null;
+    let particleInstanceCapacity = 0;
     const randomForCell = (row: number, col: number, variant = 0) => {
       let seed =
         ((row * 73856093) ^ (col * 19349663) ^ (variant * 83492791) ^ baseSeed) >>> 0;
@@ -202,6 +319,45 @@ export function CircleWallpaper({
 
       if (instancedCircles) {
         instancedCircles.count = required;
+      }
+    };
+
+    const ensureParticleCapacity = (required: number) => {
+      if (required <= 0) {
+        if (instancedParticles) {
+          instancedParticles.count = 0;
+        }
+        return;
+      }
+
+      if (!instancedParticles || required > particleInstanceCapacity) {
+        const nextCapacity = Math.max(
+          required,
+          Math.ceil(Math.max(1, particleInstanceCapacity) * 1.2),
+        );
+        if (instancedParticles) {
+          particlesGroup.remove(instancedParticles);
+          instancedParticles.dispose();
+        }
+        instancedParticles = new THREE.InstancedMesh(
+          particleGeometry,
+          particleMaterial,
+          nextCapacity,
+        );
+        instancedParticles.frustumCulled = false;
+        instancedParticles.renderOrder = 3;
+        particlesGroup.add(instancedParticles);
+        particleInstanceCapacity = nextCapacity;
+        particleOpacityAttribute = new THREE.InstancedBufferAttribute(
+          new Float32Array(nextCapacity),
+          1,
+        );
+        particleOpacityAttribute.setUsage(THREE.DynamicDrawUsage);
+        instancedParticles.geometry.setAttribute("instanceOpacity", particleOpacityAttribute);
+      }
+
+      if (instancedParticles) {
+        instancedParticles.count = required;
       }
     };
 
@@ -302,6 +458,7 @@ export function CircleWallpaper({
       baseOpacityRef.current = new Float32Array(requiredCount);
       const baseInstances = baseInstancesRef.current;
       const baseOpacityValues = baseOpacityRef.current;
+      const particleBuffer: ParticleInstanceData[] = [];
 
       let index = 0;
       let minX = Number.POSITIVE_INFINITY;
@@ -354,6 +511,94 @@ export function CircleWallpaper({
             baseOpacity: opacity,
           };
 
+          const particleRoll = randomForCell(row, worldCol, 6);
+          if (particleRoll < PARTICLE_SPAWN_CHANCE) {
+            const offsetX =
+              (randomForCell(row, worldCol, 7) - 0.5) * xSpacing * PARTICLE_OFFSET_X_RATIO;
+            const offsetY =
+              (randomForCell(row, worldCol, 8) - 0.5) * ySpacing * PARTICLE_OFFSET_Y_RATIO;
+            const sizeRand = randomForCell(row, worldCol, 9);
+            const particleSize =
+              diameter *
+              (PARTICLE_SIZE_MIN_RATIO +
+                (PARTICLE_SIZE_MAX_RATIO - PARTICLE_SIZE_MIN_RATIO) * sizeRand);
+            const floatRangeRand = randomForCell(row, worldCol, 10);
+            const floatAmplitude =
+              ySpacing *
+              (PARTICLE_FLOAT_AMPLITUDE_MIN_RATIO +
+                (PARTICLE_FLOAT_AMPLITUDE_MAX_RATIO - PARTICLE_FLOAT_AMPLITUDE_MIN_RATIO) *
+                  floatRangeRand);
+            const floatSpeed =
+              PARTICLE_FLOAT_SPEED_MIN +
+              randomForCell(row, worldCol, 11) *
+                (PARTICLE_FLOAT_SPEED_MAX - PARTICLE_FLOAT_SPEED_MIN);
+            const floatPhase = randomForCell(row, worldCol, 12) * Math.PI * 2;
+            const pulseSpeed =
+              PARTICLE_PULSE_SPEED_MIN +
+              randomForCell(row, worldCol, 13) *
+                (PARTICLE_PULSE_SPEED_MAX - PARTICLE_PULSE_SPEED_MIN);
+            const pulseOffset = randomForCell(row, worldCol, 14) * Math.PI * 2;
+            const waveStrength = 0.55 + randomForCell(row, worldCol, 15) * 0.6;
+            const depthOffset =
+              (randomForCell(row, worldCol, 16) - 0.5) *
+              diameter *
+              PARTICLE_DEPTH_OFFSET_RATIO;
+            const baseOpacity = Math.min(1, 0.5 + randomForCell(row, worldCol, 17) * 0.45);
+            const driftMagnitude =
+              xSpacing *
+              PARTICLE_DRIFT_X_RATIO *
+              (0.6 + randomForCell(row, worldCol, 18) * 0.8);
+            const driftDirection = randomForCell(row, worldCol, 19) < 0.5 ? -1 : 1;
+            const driftAmplitude = driftMagnitude;
+            const driftSpeed =
+              PARTICLE_DRIFT_SPEED_MIN +
+              randomForCell(row, worldCol, 20) *
+                (PARTICLE_DRIFT_SPEED_MAX - PARTICLE_DRIFT_SPEED_MIN);
+            const driftPhase = randomForCell(row, worldCol, 21) * Math.PI * 2;
+            const swirlMagnitude =
+              diameter *
+              PARTICLE_SWIRL_Z_RATIO *
+              (0.6 + randomForCell(row, worldCol, 22) * 0.9);
+            const swirlDirection = randomForCell(row, worldCol, 23) < 0.5 ? -1 : 1;
+            const swirlSpeed =
+              PARTICLE_SWIRL_SPEED_MIN +
+              randomForCell(row, worldCol, 24) *
+                (PARTICLE_SWIRL_SPEED_MAX - PARTICLE_SWIRL_SPEED_MIN);
+            const swirlPhase = randomForCell(row, worldCol, 25) * Math.PI * 2;
+            const spinMagnitude =
+              PARTICLE_SPIN_SPEED_MIN +
+              randomForCell(row, worldCol, 26) *
+                (PARTICLE_SPIN_SPEED_MAX - PARTICLE_SPIN_SPEED_MIN);
+            const spinSpeed =
+              spinMagnitude * (randomForCell(row, worldCol, 27) < 0.5 ? -1 : 1);
+            const spinPhase = randomForCell(row, worldCol, 28) * Math.PI * 2;
+            const baseXWithOffset = x + offsetX;
+            const baseYWithOffset = y + offsetY;
+            particleBuffer.push({
+              baseX: baseXWithOffset,
+              baseY: baseYWithOffset,
+              size: particleSize,
+              floatAmplitude,
+              floatSpeed,
+              floatPhase,
+              pulseSpeed,
+              pulseOffset,
+              waveStrength,
+              depthOffset,
+              baseOpacity,
+              driftAmplitude,
+              driftSpeed,
+              driftPhase,
+              driftDirection,
+              swirlAmplitude: swirlMagnitude,
+              swirlSpeed,
+              swirlPhase,
+              swirlDirection,
+              spinSpeed,
+              spinPhase,
+            });
+          }
+
           index += 1;
         }
       }
@@ -362,15 +607,43 @@ export function CircleWallpaper({
       instancedCircles.instanceMatrix.needsUpdate = true;
       instanceOpacityAttribute.needsUpdate = true;
 
+      ensureParticleCapacity(particleBuffer.length);
+      if (instancedParticles && particleOpacityAttribute && particleBuffer.length > 0) {
+        const particleOpacityArray = particleOpacityAttribute.array as Float32Array;
+        const particleBaseOpacities = new Float32Array(particleBuffer.length);
+        tempQuaternion.identity();
+        for (let i = 0; i < particleBuffer.length; i += 1) {
+          const data = particleBuffer[i];
+          particleBaseOpacities[i] = data.baseOpacity;
+          particleOpacityArray[i] = data.baseOpacity;
+          tempScale.set(data.size, data.size, 1);
+          tempPosition.set(data.baseX, data.baseY, baseZ + data.depthOffset);
+          tempMatrix.compose(tempPosition, tempQuaternion, tempScale);
+          instancedParticles.setMatrixAt(i, tempMatrix);
+        }
+        instancedParticles.instanceMatrix.needsUpdate = true;
+        particleOpacityAttribute.needsUpdate = true;
+        particleInstancesRef.current = particleBuffer;
+        particleOpacityRef.current = particleBaseOpacities;
+      } else {
+        particleInstancesRef.current = [];
+        particleOpacityRef.current = new Float32Array(0);
+        if (particleOpacityAttribute) {
+          particleOpacityAttribute.needsUpdate = true;
+        }
+      }
+
       const centerX = (minX + maxX) * 0.5;
       const centerY = (minY + maxY) * 0.5;
       const offsetX = -baseOffset * GRID_COS;
       const offsetY = -baseOffset * GRID_SIN;
       circlesGroup.position.set(-centerX + offsetX, -centerY + offsetY, 0);
+      particlesGroup.position.copy(circlesGroup.position);
       const amplitude = normalizedWaveHeight;
       layoutStateRef.current = {
         hasData: true,
         xSpacing,
+        ySpacing,
         diameter,
         baseZ,
         scaleX: diameter,
@@ -387,9 +660,6 @@ export function CircleWallpaper({
     };
 
     const applyWaveAnimation = (timeSeconds: number) => {
-      if (!instancedCircles || !instanceOpacityAttribute) {
-        return;
-      }
       const layoutState = layoutStateRef.current;
       if (!layoutState.hasData) {
         return;
@@ -404,89 +674,174 @@ export function CircleWallpaper({
         scaleX,
         scaleY,
       } = layoutState;
-      const baseInstances = baseInstancesRef.current;
-      const baseOpacities = baseOpacityRef.current;
-      const count = instancedCircles.count;
-      if (
-        count <= 0 ||
-        baseInstances.length < count ||
-        baseOpacities.length < count ||
-        xSpacing === 0 ||
-        waveLength === 0
-      ) {
+      if (xSpacing === 0 || waveLength === 0) {
         return;
       }
 
       const waveParams = waveParamsRef.current;
-      const opacityArray = instanceOpacityAttribute.array as Float32Array;
-      const amplitudeSafe = Math.max(1e-6, amplitude);
-      tempQuaternion.identity();
-      tempScale.set(scaleX, scaleY, 1);
       const globalScrollOffset = scrollOffset;
+      const amplitudeSafe = Math.max(1e-6, amplitude);
 
-      for (let index = 0; index < count; index += 1) {
-        const data = baseInstances[index];
-        if (!data) {
-          continue;
+      if (instancedCircles && instanceOpacityAttribute) {
+        const baseInstances = baseInstancesRef.current;
+        const baseOpacities = baseOpacityRef.current;
+        const count = instancedCircles.count;
+        if (
+          count > 0 &&
+          baseInstances.length >= count &&
+          baseOpacities.length >= count
+        ) {
+          const opacityArray = instanceOpacityAttribute.array as Float32Array;
+          tempQuaternion.identity();
+          tempScale.set(scaleX, scaleY, 1);
+
+          for (let index = 0; index < count; index += 1) {
+            const data = baseInstances[index];
+            if (!data) {
+              continue;
+            }
+
+            const worldX =
+              (data.worldColumn + data.shift) * xSpacing - globalScrollOffset;
+            const worldZ = data.baseY;
+
+            const primaryWave =
+              Math.sin(worldX / waveLength + timeSeconds * waveParams.speed) *
+              amplitude;
+
+            const secondaryWave =
+              Math.sin(
+                worldZ / (waveLength * 0.7) +
+                  worldX / (waveLength * 1.3) +
+                  timeSeconds * waveParams.speed * waveParams.secondaryFrequency,
+              ) * secondaryAmplitude;
+
+            const ripples =
+              Math.sin(
+                worldX * waveParams.rippleFrequencyX +
+                  worldZ * waveParams.rippleFrequencyZ +
+                  timeSeconds * waveParams.rippleSpeed,
+              ) * rippleAmplitude;
+
+            const totalWaveHeight = primaryWave + secondaryWave + ripples;
+
+            tempPosition.set(data.baseX, data.baseY, baseZ + totalWaveHeight);
+            tempMatrix.compose(tempPosition, tempQuaternion, tempScale);
+            instancedCircles.setMatrixAt(index, tempMatrix);
+
+            const waveIntensity = THREE.MathUtils.clamp(
+              (totalWaveHeight + amplitudeSafe) / (amplitudeSafe * 2),
+              0,
+              1,
+            );
+
+            const pulsePhase =
+              (timeSeconds * waveParams.pulseSpeed +
+                worldX * waveParams.pulseSpatialX +
+                worldZ * waveParams.pulseSpatialZ) %
+              (Math.PI * 2);
+            const pulseIntensity = (Math.sin(pulsePhase) + 1) * 0.5;
+            const sharpPulse = Math.pow(pulseIntensity, 0.3);
+            const baseMultiplier = THREE.MathUtils.lerp(0.9, 1.1, waveIntensity);
+            const highlightMultiplier = THREE.MathUtils.lerp(1.0, 1.2, sharpPulse);
+            const finalMultiplier = baseMultiplier * highlightMultiplier;
+
+            opacityArray[index] = Math.min(1, baseOpacities[index] * finalMultiplier);
+          }
+
+          instancedCircles.instanceMatrix.needsUpdate = true;
+          instanceOpacityAttribute.needsUpdate = true;
         }
-
-        const worldX =
-          (data.worldColumn + data.shift) * xSpacing - globalScrollOffset;
-        const worldZ = data.baseY;
-
-        const primaryWave =
-          Math.sin(worldX / waveLength + timeSeconds * waveParams.speed) *
-          amplitude;
-
-        const secondaryWave =
-          Math.sin(
-            worldZ / (waveLength * 0.7) +
-              worldX / (waveLength * 1.3) +
-              timeSeconds * waveParams.speed * waveParams.secondaryFrequency
-          ) * secondaryAmplitude;
-
-        const ripples =
-          Math.sin(
-            worldX * waveParams.rippleFrequencyX +
-              worldZ * waveParams.rippleFrequencyZ +
-              timeSeconds * waveParams.rippleSpeed
-          ) * rippleAmplitude;
-
-        const totalWaveHeight = primaryWave + secondaryWave + ripples;
-
-        tempPosition.set(
-          data.baseX,
-          data.baseY,
-          baseZ + totalWaveHeight
-        );
-        tempMatrix.compose(tempPosition, tempQuaternion, tempScale);
-        instancedCircles.setMatrixAt(index, tempMatrix);
-
-        const waveIntensity = THREE.MathUtils.clamp(
-          (totalWaveHeight + amplitudeSafe) / (amplitudeSafe * 2),
-          0,
-          1
-        );
-
-        const pulsePhase =
-          (timeSeconds * waveParams.pulseSpeed +
-            worldX * waveParams.pulseSpatialX +
-            worldZ * waveParams.pulseSpatialZ) %
-          (Math.PI * 2);
-        const pulseIntensity = (Math.sin(pulsePhase) + 1) * 0.5;
-        const sharpPulse = Math.pow(pulseIntensity, 0.3);
-        const baseMultiplier = THREE.MathUtils.lerp(0.9, 1.1, waveIntensity);
-        const highlightMultiplier = THREE.MathUtils.lerp(1.0, 1.2, sharpPulse);
-        const finalMultiplier = baseMultiplier * highlightMultiplier;
-
-        opacityArray[index] = Math.min(
-          1,
-          baseOpacities[index] * finalMultiplier
-        );
       }
 
-      instancedCircles.instanceMatrix.needsUpdate = true;
-      instanceOpacityAttribute.needsUpdate = true;
+      if (instancedParticles && particleOpacityAttribute) {
+        const particleData = particleInstancesRef.current;
+        const particleBaseOpacities = particleOpacityRef.current;
+        const particleCount = instancedParticles.count;
+        if (
+          particleCount > 0 &&
+          particleData.length >= particleCount &&
+          particleBaseOpacities.length >= particleCount
+        ) {
+          const particleOpacityArray = particleOpacityAttribute.array as Float32Array;
+
+          for (let index = 0; index < particleCount; index += 1) {
+            const data = particleData[index];
+            if (!data) {
+              continue;
+            }
+
+            const worldX = data.baseX - globalScrollOffset;
+            const worldZ = data.baseY;
+
+            const primaryWave =
+              Math.sin(worldX / waveLength + timeSeconds * waveParams.speed) * amplitude;
+            const secondaryWave =
+              Math.sin(
+                worldZ / (waveLength * 0.7) +
+                  worldX / (waveLength * 1.3) +
+                  timeSeconds * waveParams.speed * waveParams.secondaryFrequency,
+              ) * secondaryAmplitude;
+            const ripples =
+              Math.sin(
+                worldX * waveParams.rippleFrequencyX +
+                  worldZ * waveParams.rippleFrequencyZ +
+                  timeSeconds * waveParams.rippleSpeed,
+              ) * rippleAmplitude;
+
+            const combinedWave =
+              (primaryWave + secondaryWave * 0.6 + ripples * 0.45) * data.waveStrength;
+
+            const floatOffset =
+              Math.sin(timeSeconds * data.floatSpeed + data.floatPhase) * data.floatAmplitude;
+            const driftOffset =
+              Math.sin(timeSeconds * data.driftSpeed + data.driftPhase) *
+              data.driftAmplitude *
+              data.driftDirection;
+            const swirlOffset =
+              Math.sin(timeSeconds * data.swirlSpeed + data.swirlPhase) *
+              data.swirlAmplitude *
+              data.swirlDirection;
+            const spinAngle = timeSeconds * data.spinSpeed + data.spinPhase;
+
+            tempScale.set(data.size, data.size, 1);
+            tempQuaternion.setFromAxisAngle(PARTICLE_SPIN_AXIS, spinAngle);
+            tempPosition.set(
+              data.baseX + driftOffset,
+              data.baseY + floatOffset,
+              baseZ + combinedWave + data.depthOffset + swirlOffset,
+            );
+            tempMatrix.compose(tempPosition, tempQuaternion, tempScale);
+            instancedParticles.setMatrixAt(index, tempMatrix);
+
+            const pulse =
+              1 -
+              PARTICLE_PULSE_STRENGTH +
+              Math.sin(timeSeconds * data.pulseSpeed + data.pulseOffset) * PARTICLE_PULSE_STRENGTH;
+            const shimmer =
+              1 -
+              PARTICLE_SHIMMER_STRENGTH +
+              Math.sin(timeSeconds * (data.pulseSpeed * 0.5 + 0.3) + data.floatPhase) *
+                PARTICLE_SHIMMER_STRENGTH;
+
+            const waveGlow = THREE.MathUtils.lerp(
+              0.92,
+              1.18,
+              THREE.MathUtils.clamp(Math.abs(combinedWave) / (amplitudeSafe + 1e-6), 0, 1),
+            );
+
+            const finalOpacity = THREE.MathUtils.clamp(
+              particleBaseOpacities[index] * pulse * shimmer * waveGlow,
+              0,
+              1,
+            );
+            particleOpacityArray[index] = finalOpacity;
+          }
+
+          instancedParticles.instanceMatrix.needsUpdate = true;
+          particleOpacityAttribute.needsUpdate = true;
+        }
+      }
     };
 
     const updateSize = () => {
@@ -619,8 +974,17 @@ export function CircleWallpaper({
       instancedCircles = null;
       instanceOpacityAttribute = null;
       instanceCapacity = 0;
+      if (instancedParticles) {
+        particlesGroup.remove(instancedParticles);
+        instancedParticles.dispose();
+      }
+      instancedParticles = null;
+      particleOpacityAttribute = null;
+      particleInstanceCapacity = 0;
       baseInstancesRef.current = [];
       baseOpacityRef.current = new Float32Array(0);
+      particleInstancesRef.current = [];
+      particleOpacityRef.current = new Float32Array(0);
       layoutStateRef.current = {
         hasData: false,
         xSpacing: 1,
@@ -636,6 +1000,9 @@ export function CircleWallpaper({
       };
       circleGeometry.dispose();
       circleMaterial.dispose();
+      particleGeometry.dispose();
+      particleMaterial.dispose();
+      particleTexture.dispose();
       renderer.dispose();
     };
   }, [effectiveCameraDistance, normalizedWaveHeight, secondaryWaveAmplitude, rippleWaveAmplitude]);
