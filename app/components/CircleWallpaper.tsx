@@ -15,7 +15,47 @@ const X_SPACING_MULTIPLIER = ((BASE_X_SPACING_MULTIPLIER * Y_SPACING_REDUCTION) 
 const MIN_OPACITY = 0.08;
 const HALF_OPACITY = 0.5;
 const FALLOFF_POWER = 3.2;
-const HORIZONTAL_SCROLL_SPEED = 80;
+const HORIZONTAL_SCROLL_SPEED = 2.0;
+const CAMERA_FOV = 40;
+const CAMERA_DISTANCE = 45;
+const CAMERA_NEAR = 0.1;
+const CAMERA_FAR = 200;
+const GRID_PLANE_Z = 0;
+
+type BaseInstanceData = {
+  baseX: number;
+  baseY: number;
+  row: number;
+  col: number;
+  shift: number;
+  worldColumn: number;
+  baseOpacity: number;
+};
+
+type LayoutState = {
+  hasData: boolean;
+  xSpacing: number;
+  ySpacing: number;
+  diameter: number;
+  baseZ: number;
+  scaleX: number;
+  scaleY: number;
+  amplitude: number;
+  secondaryAmplitude: number;
+  rippleAmplitude: number;
+  waveLength: number;
+};
+
+type WaveParams = {
+  speed: number;
+  secondaryFrequency: number;
+  rippleFrequencyX: number;
+  rippleFrequencyZ: number;
+  rippleSpeed: number;
+  pulseSpeed: number;
+  pulseSpatialX: number;
+  pulseSpatialZ: number;
+};
 
 export type CircleWallpaperProps = {
   style?: CSSProperties;
@@ -23,6 +63,31 @@ export type CircleWallpaperProps = {
 
 export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const baseInstancesRef = useRef<BaseInstanceData[]>([]);
+  const baseOpacityRef = useRef<Float32Array>(new Float32Array(0));
+  const layoutStateRef = useRef<LayoutState>({
+    hasData: false,
+    xSpacing: 1,
+    ySpacing: 1,
+    diameter: 1,
+    baseZ: GRID_PLANE_Z,
+    scaleX: 1,
+    scaleY: 1,
+    amplitude: 1,
+    secondaryAmplitude: 0.15,
+    rippleAmplitude: 0.05,
+    waveLength: 4,
+  });
+  const waveParamsRef = useRef<WaveParams>({
+    speed: 1.2,
+    secondaryFrequency: 1.5,
+    rippleFrequencyX: 2.5,
+    rippleFrequencyZ: 1.8,
+    rippleSpeed: 3.0,
+    pulseSpeed: 1.5,
+    pulseSpatialX: 0.8,
+    pulseSpatialZ: 0.6,
+  });
 
   useEffect(() => {
     const container = containerRef.current;
@@ -50,8 +115,14 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
     renderer.domElement.style.pointerEvents = "none";
     container.appendChild(renderer.domElement);
 
-    const camera = new THREE.OrthographicCamera(-0.5, 0.5, 0.5, -0.5, -100, 100);
-    camera.position.z = 10;
+    const camera = new THREE.PerspectiveCamera(
+      CAMERA_FOV,
+      container.clientWidth / container.clientHeight,
+      CAMERA_NEAR,
+      CAMERA_FAR,
+    );
+    camera.position.set(0, 0, CAMERA_DISTANCE);
+    camera.lookAt(0, 0, GRID_PLANE_Z);
 
     const circleGeometry = new THREE.PlaneGeometry(1, 1);
     const circleMaterial = new THREE.MeshBasicMaterial({
@@ -125,6 +196,8 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
 
     let currentWidth = container.clientWidth;
     let currentHeight = container.clientHeight;
+    let currentViewWidth = 0;
+    let currentViewHeight = 0;
     let scrollOffset = 0;
     let worldColumnOffset = 0;
     let layoutBaseOffset = 0;
@@ -132,18 +205,22 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
     let animationStopped = false;
     let currentXSpacing = 1;
 
-    const layoutCircles = (width: number, height: number, columnWorldOffset = 0) => {
-      const diameter = Math.max(1, Math.min(width * 0.075, height * 0.18));
+    const layoutCircles = (
+      viewWidth: number,
+      viewHeight: number,
+      columnWorldOffset = 0,
+    ) => {
+      const diameter = Math.max(0.2, Math.min(viewWidth * 0.07, viewHeight * 0.12));
       const xSpacing = diameter * X_SPACING_MULTIPLIER;
       const ySpacing = diameter * Y_SPACING_MULTIPLIER;
       const radius = diameter * 0.5;
-      const safetyPadding = Math.max(4, diameter * 0.1);
+      const safetyPadding = Math.max(diameter * 0.12, 0.2);
       currentXSpacing = xSpacing;
       const baseOffset = 0;
       layoutBaseOffset = baseOffset;
 
-      const halfWidth = width * 0.5;
-      const halfHeight = height * 0.5;
+      const halfWidth = viewWidth * 0.5;
+      const halfHeight = viewHeight * 0.5;
       const corners = [
         { x: -halfWidth, y: -halfHeight },
         { x: -halfWidth, y: halfHeight },
@@ -190,6 +267,12 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
 
       if (requiredCount <= 0) {
         ensureInstanceCapacity(0);
+        baseInstancesRef.current = [];
+        baseOpacityRef.current = new Float32Array(0);
+        layoutStateRef.current = {
+          ...layoutStateRef.current,
+          hasData: false,
+        };
         return;
       }
 
@@ -199,12 +282,17 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
       }
 
       const opacityArray = instanceOpacityAttribute.array as Float32Array;
+      baseInstancesRef.current = new Array<BaseInstanceData>(requiredCount);
+      baseOpacityRef.current = new Float32Array(requiredCount);
+      const baseInstances = baseInstancesRef.current;
+      const baseOpacityValues = baseOpacityRef.current;
 
       let index = 0;
       let minX = Number.POSITIVE_INFINITY;
       let maxX = Number.NEGATIVE_INFINITY;
       let minY = Number.POSITIVE_INFINITY;
       let maxY = Number.NEGATIVE_INFINITY;
+      const baseZ = GRID_PLANE_Z;
 
       for (const { row, shift, cMin, cMax } of rows) {
         const y = row * ySpacing;
@@ -215,7 +303,7 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
           const x = (col + shift) * xSpacing;
           const worldCol = col + columnWorldOffset;
 
-          tempPosition.set(x, y, 5);
+          tempPosition.set(x, y, baseZ);
           tempMatrix.compose(tempPosition, tempQuaternion, tempScale);
           instancedCircles.setMatrixAt(index, tempMatrix);
 
@@ -239,6 +327,16 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
             opacity = Math.min(HALF_OPACITY - 0.05, Math.max(MIN_OPACITY, value));
           }
           opacityArray[index] = opacity;
+          baseOpacityValues[index] = opacity;
+          baseInstances[index] = {
+            baseX: x,
+            baseY: y,
+            row,
+            col,
+            shift,
+            worldColumn: worldCol,
+            baseOpacity: opacity,
+          };
 
           index += 1;
         }
@@ -253,10 +351,126 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
       const offsetX = -baseOffset * GRID_COS;
       const offsetY = -baseOffset * GRID_SIN;
       circlesGroup.position.set(-centerX + offsetX, -centerY + offsetY, 0);
+      const amplitude = 1;
+      layoutStateRef.current = {
+        hasData: true,
+        xSpacing,
+        diameter,
+        baseZ,
+        scaleX: diameter,
+        scaleY: diameter,
+        amplitude,
+        secondaryAmplitude: 0.15,
+        rippleAmplitude: 0.05,
+        waveLength: 4.0,
+      };
     };
 
     const renderScene = () => {
       renderer.render(scene, camera);
+    };
+
+    const applyWaveAnimation = (timeSeconds: number) => {
+      if (!instancedCircles || !instanceOpacityAttribute) {
+        return;
+      }
+      const layoutState = layoutStateRef.current;
+      if (!layoutState.hasData) {
+        return;
+      }
+      const {
+        xSpacing,
+        amplitude,
+        secondaryAmplitude,
+        rippleAmplitude,
+        waveLength,
+        baseZ,
+        scaleX,
+        scaleY,
+      } = layoutState;
+      const baseInstances = baseInstancesRef.current;
+      const baseOpacities = baseOpacityRef.current;
+      const count = instancedCircles.count;
+      if (
+        count <= 0 ||
+        baseInstances.length < count ||
+        baseOpacities.length < count ||
+        xSpacing === 0 ||
+        waveLength === 0
+      ) {
+        return;
+      }
+
+      const waveParams = waveParamsRef.current;
+      const opacityArray = instanceOpacityAttribute.array as Float32Array;
+      const amplitudeSafe = Math.max(1e-6, amplitude);
+      tempQuaternion.identity();
+      tempScale.set(scaleX, scaleY, 1);
+      const globalScrollOffset = scrollOffset;
+
+      for (let index = 0; index < count; index += 1) {
+        const data = baseInstances[index];
+        if (!data) {
+          continue;
+        }
+
+        const worldX =
+          (data.worldColumn + data.shift) * xSpacing - globalScrollOffset;
+        const worldZ = data.baseY;
+
+        const primaryWave =
+          Math.sin(worldX / waveLength + timeSeconds * waveParams.speed) *
+          amplitude;
+
+        const secondaryWave =
+          Math.sin(
+            worldZ / (waveLength * 0.7) +
+              worldX / (waveLength * 1.3) +
+              timeSeconds * waveParams.speed * waveParams.secondaryFrequency
+          ) * secondaryAmplitude;
+
+        const ripples =
+          Math.sin(
+            worldX * waveParams.rippleFrequencyX +
+              worldZ * waveParams.rippleFrequencyZ +
+              timeSeconds * waveParams.rippleSpeed
+          ) * rippleAmplitude;
+
+        const totalWaveHeight = primaryWave + secondaryWave + ripples;
+
+        tempPosition.set(
+          data.baseX,
+          data.baseY,
+          baseZ + totalWaveHeight
+        );
+        tempMatrix.compose(tempPosition, tempQuaternion, tempScale);
+        instancedCircles.setMatrixAt(index, tempMatrix);
+
+        const waveIntensity = THREE.MathUtils.clamp(
+          (totalWaveHeight + amplitudeSafe) / (amplitudeSafe * 2),
+          0,
+          1
+        );
+
+        const pulsePhase =
+          (timeSeconds * waveParams.pulseSpeed +
+            worldX * waveParams.pulseSpatialX +
+            worldZ * waveParams.pulseSpatialZ) %
+          (Math.PI * 2);
+        const pulseIntensity = (Math.sin(pulsePhase) + 1) * 0.5;
+        const sharpPulse = Math.pow(pulseIntensity, 0.3);
+        const baseMultiplier = THREE.MathUtils.lerp(0.9, 1.1, waveIntensity);
+        const highlightMultiplier = THREE.MathUtils.lerp(1.0, 1.2, sharpPulse);
+        const finalMultiplier = baseMultiplier * highlightMultiplier;
+
+        opacityArray[index] = Math.min(
+          1,
+          baseOpacities[index] * finalMultiplier
+        );
+      }
+
+      instancedCircles.instanceMatrix.needsUpdate = true;
+      instanceOpacityAttribute.needsUpdate = true;
     };
 
     const updateSize = () => {
@@ -268,20 +482,25 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.7));
       renderer.setSize(clientWidth, clientHeight, false);
 
-      camera.left = -clientWidth / 2;
-      camera.right = clientWidth / 2;
-      camera.top = clientHeight / 2;
-      camera.bottom = -clientHeight / 2;
+      camera.aspect = clientWidth / clientHeight;
       camera.updateProjectionMatrix();
+
+      const distanceToPlane = camera.position.z - GRID_PLANE_Z;
+      const verticalFov = THREE.MathUtils.degToRad(camera.fov);
+      const viewHeight = 2 * Math.tan(verticalFov / 2) * distanceToPlane;
+      const viewWidth = viewHeight * camera.aspect;
 
       currentWidth = clientWidth;
       currentHeight = clientHeight;
+      currentViewWidth = viewWidth;
+      currentViewHeight = viewHeight;
       scrollOffset = 0;
       layoutBaseOffset = 0;
       worldColumnOffset = 0;
       scrollGroup.position.set(0, 0, 0);
       lastTimestamp = null;
-      layoutCircles(currentWidth, currentHeight, worldColumnOffset);
+      layoutCircles(currentViewWidth, currentViewHeight, worldColumnOffset);
+      applyWaveAnimation(0);
       renderScene();
     };
 
@@ -309,8 +528,10 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
       if (animationStopped) {
         return;
       }
+      const timeSeconds = timestamp / 1000;
       if (lastTimestamp === null) {
         lastTimestamp = timestamp;
+        applyWaveAnimation(timeSeconds);
         renderScene();
         return;
       }
@@ -321,7 +542,12 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
         return;
       }
 
-      if (currentWidth <= 0 || currentHeight <= 0) {
+      if (
+        currentWidth <= 0 ||
+        currentHeight <= 0 ||
+        currentViewWidth <= 0 ||
+        currentViewHeight <= 0
+      ) {
         renderScene();
         return;
       }
@@ -338,10 +564,12 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
         }
       }
 
-      if (layoutNeedsUpdate) {
-        layoutCircles(currentWidth, currentHeight, worldColumnOffset);
+      if (layoutNeedsUpdate && currentViewWidth > 0 && currentViewHeight > 0) {
+        layoutCircles(currentViewWidth, currentViewHeight, worldColumnOffset);
         offsetDelta = scrollOffset - worldColumnOffset * spacing - layoutBaseOffset;
       }
+
+      applyWaveAnimation(timeSeconds);
 
       const worldX = -offsetDelta * GRID_COS;
       const worldY = -offsetDelta * GRID_SIN;
@@ -375,6 +603,21 @@ export function CircleWallpaper({ style }: CircleWallpaperProps = {}) {
       instancedCircles = null;
       instanceOpacityAttribute = null;
       instanceCapacity = 0;
+      baseInstancesRef.current = [];
+      baseOpacityRef.current = new Float32Array(0);
+      layoutStateRef.current = {
+        hasData: false,
+        xSpacing: 1,
+        ySpacing: 1,
+        diameter: 1,
+        baseZ: GRID_PLANE_Z,
+        scaleX: 1,
+        scaleY: 1,
+        amplitude: 1,
+        secondaryAmplitude: 0.15,
+        rippleAmplitude: 0.05,
+        waveLength: 4,
+      };
       circleGeometry.dispose();
       circleMaterial.dispose();
       renderer.dispose();
