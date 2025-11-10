@@ -3,6 +3,9 @@
 
 import { useEffect, useRef, type CSSProperties } from "react";
 import * as THREE from "three";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { BokehPass } from "three/examples/jsm/postprocessing/BokehPass.js";
 
 const GRID_ROTATION_RAD = THREE.MathUtils.degToRad(20);
 const GRID_COS = Math.cos(GRID_ROTATION_RAD);
@@ -45,6 +48,13 @@ const PARTICLE_SPIN_AXIS = new THREE.Vector3(0, 0, 1);
 const PARTICLE_SWIRL_Z_RATIO = 0.14;
 const PARTICLE_SWIRL_SPEED_MIN = 0.7;
 const PARTICLE_SWIRL_SPEED_MAX = 1.9;
+// Depth of field tuning values; keep focus locked on the nearest crest each frame.
+const DOF_FOCUS_FRONT_BIAS = 0;
+const DOF_APERTURE = 0.04;
+const DOF_MAX_BLUR = 0.02;
+const DOF_FOCUS_FALLOFF_BASE = 1.25;
+const DOF_FOCUS_FALLOFF_VARIANCE = 0.9;
+const DOF_MIN_FOCUS_RANGE = 0.01;
 
 function createParticleTexture(size = 128) {
   const canvas = document.createElement("canvas");
@@ -143,6 +153,7 @@ export type CircleWallpaperProps = {
   waveHeight?: number;
   cameraTranslation?: CameraVector;
   cameraRotation?: CameraVector;
+  blurIntensity?: number;
 };
 
 export function CircleWallpaper({
@@ -151,6 +162,7 @@ export function CircleWallpaper({
   waveHeight = DEFAULT_WAVE_HEIGHT,
   cameraTranslation,
   cameraRotation,
+  blurIntensity,
 }: CircleWallpaperProps = {}) {
   const effectiveCameraDistance = Number.isFinite(cameraDistance)
     ? cameraDistance
@@ -169,6 +181,12 @@ export function CircleWallpaper({
   const rotationZ = sanitizeAxisValue(cameraRotation?.z);
   const secondaryWaveAmplitude = normalizedWaveHeight * 0.15;
   const rippleWaveAmplitude = normalizedWaveHeight * 0.05;
+  const normalizedBlurIntensity = (() => {
+    const value = typeof blurIntensity === "number" && Number.isFinite(blurIntensity)
+      ? blurIntensity
+      : 1;
+    return Math.max(0, value);
+  })();
   const containerRef = useRef<HTMLDivElement>(null);
   const baseInstancesRef = useRef<BaseInstanceData[]>([]);
   const baseOpacityRef = useRef<Float32Array>(new Float32Array(0));
@@ -204,6 +222,13 @@ export function CircleWallpaper({
       return;
     }
 
+    const dofAperture = normalizedBlurIntensity === 0 ? 0 : DOF_APERTURE * normalizedBlurIntensity;
+    const dofMaxBlur = normalizedBlurIntensity === 0 ? 0 : DOF_MAX_BLUR * normalizedBlurIntensity;
+    const focusFalloffPower = Math.max(
+      1,
+      DOF_FOCUS_FALLOFF_BASE + normalizedBlurIntensity * DOF_FOCUS_FALLOFF_VARIANCE,
+    );
+
     const baseSeed = (Math.floor(Math.random() * 0xffffffff) >>> 0) || 0x9e3779b1;
 
     const scene = new THREE.Scene();
@@ -215,6 +240,11 @@ export function CircleWallpaper({
     particlesGroup.rotation.z = GRID_ROTATION_RAD;
     scrollGroup.add(particlesGroup);
     scene.add(scrollGroup);
+
+    let composer: EffectComposer | null = null;
+    let bokehPass: BokehPass | null = null;
+    const focusTarget = new THREE.Vector3();
+    const farFocusTarget = new THREE.Vector3();
 
     const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: "high-performance" });
     renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -244,6 +274,111 @@ export function CircleWallpaper({
       camera.rotation.y += rotationY;
       camera.rotation.z += rotationZ;
     }
+
+    let lastFocusDistance = -1;
+    let lastFocusRange = -1;
+
+    const updateDepthOfField = (targetZ: number, farZ?: number) => {
+      focusTarget.set(0, 0, targetZ);
+      const focusDistance = Math.max(0.1, camera.position.distanceTo(focusTarget));
+      if (!Number.isFinite(focusDistance)) {
+        return;
+      }
+
+      let focusRange = DOF_MIN_FOCUS_RANGE;
+      if (typeof farZ === "number" && Number.isFinite(farZ)) {
+        farFocusTarget.set(0, 0, farZ);
+        const farDistance = Math.max(0.1, camera.position.distanceTo(farFocusTarget));
+        focusRange = Math.max(DOF_MIN_FOCUS_RANGE, farDistance - focusDistance);
+      }
+
+      const distanceChanged = Math.abs(focusDistance - lastFocusDistance) > 1e-3 || lastFocusDistance < 0;
+      const rangeChanged = Math.abs(focusRange - lastFocusRange) > 1e-3 || lastFocusRange < 0;
+
+      if (distanceChanged) {
+        lastFocusDistance = focusDistance;
+        camera.focus = focusDistance;
+      }
+      if (rangeChanged) {
+        lastFocusRange = focusRange;
+      }
+
+      if (bokehPass) {
+        if (distanceChanged) {
+          bokehPass.uniforms.focus.value = focusDistance;
+        }
+        if (rangeChanged) {
+          if (!bokehPass.uniforms.focusRange) {
+            bokehPass.uniforms.focusRange = { value: focusRange } as { value: number };
+          } else {
+            bokehPass.uniforms.focusRange.value = focusRange;
+          }
+        }
+        bokehPass.uniforms.aperture.value = dofAperture;
+        bokehPass.uniforms.maxblur.value = dofMaxBlur;
+        if (bokehPass.uniforms.focusFalloff) {
+          bokehPass.uniforms.focusFalloff.value = focusFalloffPower;
+        }
+      }
+    };
+
+    const defaultFocusTargetZ =
+      GRID_PLANE_Z +
+      normalizedWaveHeight +
+      secondaryWaveAmplitude +
+      rippleWaveAmplitude +
+      DOF_FOCUS_FRONT_BIAS;
+    const defaultFarTargetZ =
+      GRID_PLANE_Z -
+      (normalizedWaveHeight + secondaryWaveAmplitude + rippleWaveAmplitude);
+    focusTarget.set(0, 0, defaultFocusTargetZ);
+    const initialFocusDistance = Math.max(0.1, camera.position.distanceTo(focusTarget));
+
+    composer = new EffectComposer(renderer);
+    const renderPass = new RenderPass(scene, camera);
+    composer.addPass(renderPass);
+    bokehPass = new BokehPass(scene, camera, {
+      focus: initialFocusDistance,
+      aperture: dofAperture,
+      maxblur: dofMaxBlur,
+    });
+    const bokehMaterial = bokehPass.materialBokeh;
+    const bokehUniforms = bokehMaterial.uniforms;
+    const focusFalloffUniform = (bokehUniforms.focusFalloff ??= { value: focusFalloffPower });
+    focusFalloffUniform.value = focusFalloffPower;
+    const focusRangeUniform = (bokehUniforms.focusRange ??= { value: DOF_MIN_FOCUS_RANGE });
+    focusRangeUniform.value = DOF_MIN_FOCUS_RANGE;
+    if (!bokehMaterial.userData.focusFalloffPatched) {
+      bokehMaterial.fragmentShader = bokehMaterial.fragmentShader
+        .replace(
+          "uniform sampler2D tColor;",
+          "uniform sampler2D tColor;\n\nvec4 sampleColor( vec2 sampleUv ) {\n\tvec4 texel = texture2D( tColor, sampleUv );\n\ttexel.rgb *= texel.a;\n\treturn texel;\n}\n",
+        )
+        .replace(
+          "uniform float focus;",
+          "uniform float focus;\nuniform float focusRange;\nuniform float focusFalloff;",
+        )
+        .replace(
+          "vec4 col = vec4( 0.0 );",
+          "vec4 col = vec4( 0.0 );",
+        )
+        .replace(/col \+= texture2D\( tColor, /g, "col += sampleColor( ")
+        .replace(
+          "float factor = ( focus + viewZ );",
+          "float factor = ( focus + viewZ );\n\tfloat viewDistance = -viewZ;\n\tfloat depthDelta = viewDistance - focus;\n\tif ( depthDelta <= 0.0 ) {\n\t\tfactor = 0.0;\n\t} else {\n\t\tfloat normalized = clamp( depthDelta / max( focusRange, 1e-6 ), 0.0, 1.0 );\n\t\tfactor = pow( normalized, focusFalloff );\n\t}\n",
+        )
+        .replace(
+          "gl_FragColor = col / 41.0;\n\tgl_FragColor.a = 1.0;",
+          "float totalWeight = max( col.a, 1e-5 );\n\tvec3 finalColor = col.rgb / totalWeight;\n\tfloat finalAlpha = clamp( col.a / 41.0, 0.0, 1.0 );\n\tgl_FragColor = vec4( finalColor, finalAlpha );",
+        );
+      bokehMaterial.userData.focusFalloffPatched = true;
+      bokehMaterial.needsUpdate = true;
+    }
+    bokehPass.uniforms.focusFalloff = bokehUniforms.focusFalloff;
+    bokehPass.uniforms.focusRange = focusRangeUniform;
+    bokehPass.renderToScreen = true;
+    composer.addPass(bokehPass);
+    updateDepthOfField(defaultFocusTargetZ, defaultFarTargetZ);
 
     const circleGeometry = new THREE.PlaneGeometry(1, 1);
     const circleMaterial = new THREE.MeshBasicMaterial({
@@ -682,8 +817,12 @@ export function CircleWallpaper({
       };
     };
 
-    const renderScene = () => {
-      renderer.render(scene, camera);
+    const renderScene = (delta?: number) => {
+      if (composer) {
+        composer.render(delta);
+      } else {
+        renderer.render(scene, camera);
+      }
     };
 
     const applyWaveAnimation = (timeSeconds: number) => {
@@ -708,6 +847,8 @@ export function CircleWallpaper({
       const waveParams = waveParamsRef.current;
       const globalScrollOffset = scrollOffset;
       const amplitudeSafe = Math.max(1e-6, amplitude);
+      let crestZ = Number.NEGATIVE_INFINITY;
+      let troughZ = Number.POSITIVE_INFINITY;
 
       if (instancedCircles && instanceOpacityAttribute) {
         const baseInstances = baseInstancesRef.current;
@@ -751,8 +892,15 @@ export function CircleWallpaper({
               ) * rippleAmplitude;
 
             const totalWaveHeight = primaryWave + secondaryWave + ripples;
+            const circleZ = baseZ + totalWaveHeight;
+            if (circleZ > crestZ) {
+              crestZ = circleZ;
+            }
+            if (circleZ < troughZ) {
+              troughZ = circleZ;
+            }
 
-            tempPosition.set(data.baseX, data.baseY, baseZ + totalWaveHeight);
+            tempPosition.set(data.baseX, data.baseY, circleZ);
             tempMatrix.compose(tempPosition, tempQuaternion, tempScale);
             instancedCircles.setMatrixAt(index, tempMatrix);
 
@@ -778,6 +926,11 @@ export function CircleWallpaper({
 
           instancedCircles.instanceMatrix.needsUpdate = true;
           instanceOpacityAttribute.needsUpdate = true;
+
+          if (crestZ !== Number.NEGATIVE_INFINITY) {
+            const farZ = troughZ !== Number.POSITIVE_INFINITY ? troughZ : crestZ;
+            updateDepthOfField(crestZ + DOF_FOCUS_FRONT_BIAS, farZ);
+          }
         }
       }
 
@@ -880,8 +1033,18 @@ export function CircleWallpaper({
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.7));
       renderer.setSize(clientWidth, clientHeight, false);
 
+      if (composer) {
+        composer.setPixelRatio(renderer.getPixelRatio());
+        composer.setSize(clientWidth, clientHeight);
+      }
+
       camera.aspect = clientWidth / clientHeight;
       camera.updateProjectionMatrix();
+
+      if (bokehPass) {
+        bokehPass.uniforms.aspect.value = camera.aspect;
+      }
+      updateDepthOfField(defaultFocusTargetZ, defaultFarTargetZ);
 
       const distanceToPlane = Math.max(camera.position.z - GRID_PLANE_Z, 0.01);
       const verticalFov = THREE.MathUtils.degToRad(camera.fov);
@@ -936,7 +1099,7 @@ export function CircleWallpaper({
       const deltaSeconds = (timestamp - lastTimestamp) / 1000;
       lastTimestamp = timestamp;
       if (deltaSeconds <= 0) {
-        renderScene();
+        renderScene(deltaSeconds);
         return;
       }
 
@@ -972,7 +1135,7 @@ export function CircleWallpaper({
       const worldX = -offsetDelta * GRID_COS;
       const worldY = -offsetDelta * GRID_SIN;
       scrollGroup.position.set(worldX, worldY, 0);
-      renderScene();
+      renderScene(deltaSeconds);
     };
 
     renderer.setAnimationLoop(animate);
@@ -994,6 +1157,11 @@ export function CircleWallpaper({
       if (renderer.domElement.parentElement === container) {
         container.removeChild(renderer.domElement);
       }
+      if (composer) {
+        composer.dispose();
+      }
+      composer = null;
+      bokehPass = null;
       if (instancedCircles) {
         circlesGroup.remove(instancedCircles);
         instancedCircles.dispose();
@@ -1043,6 +1211,7 @@ export function CircleWallpaper({
     rotationX,
     rotationY,
     rotationZ,
+    normalizedBlurIntensity,
   ]);
 
   return (
